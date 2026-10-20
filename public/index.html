@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Playwright 测试录制</title>
+  <style>
+    body { font-family: sans-serif; max-width: 860px; margin: 40px auto; padding: 0 20px; }
+    input, select, textarea { width: 100%; padding: 8px; margin: 6px 0 12px; box-sizing: border-box; }
+    textarea { min-height: 220px; font-family: monospace; }
+    button { padding: 10px 16px; background: #2563eb; color: #fff; border: none; cursor: pointer; border-radius: 4px; margin-right: 8px; }
+    button:disabled { background: #93c5fd; cursor: not-allowed; }
+    button.danger { background: #dc2626; }
+    .row { display: flex; gap: 12px; align-items: center; }
+    #status { margin-top: 12px; color: #555; }
+    #fileList table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    #fileList th, #fileList td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e5e7eb; }
+    #editor { display: none; margin-top: 16px; }
+    video { width: 100%; max-height: 480px; margin-top: 12px; background: #000; }
+  </style>
+</head>
+<body>
+  <h1>🎬 Playwright 测试录制</h1>
+
+  <label>测试名称</label>
+  <input type="text" id="testName" placeholder="例如：登录流程测试">
+
+  <label>目标网址</label>
+  <input type="text" id="targetUrl" placeholder="https://example.com">
+
+  <div class="row">
+    <div style="flex:1">
+      <label>输出语言</label>
+      <select id="language">
+        <option value="javascript">JavaScript</option>
+        <option value="python">Python</option>
+        <option value="java">Java</option>
+        <option value="csharp">C#</option>
+      </select>
+    </div>
+    <div style="flex:1">
+      <label style="display:flex;align-items:center;gap:6px;margin-top:24px;">
+        <input type="checkbox" id="useStorage" style="width:auto;margin:0;"> 复用登录态
+      </label>
+    </div>
+  </div>
+
+  <button id="startBtn" onclick="startTest()">开始录制</button>
+  <div id="status"></div>
+
+  <h2>📁 已录制的测试</h2>
+  <div id="fileList"><button onclick="loadFiles()">刷新列表</button></div>
+
+  <div id="editor">
+    <h3>编辑：<span id="editFilename"></span></h3>
+    <textarea id="editContent"></textarea>
+    <button onclick="saveFile()">保存</button>
+    <button onclick="closeEditor()">取消</button>
+  </div>
+
+  <div id="replayArea" style="display:none;margin-top:16px;">
+    <h3>回放预览</h3>
+    <div id="replayStatus"></div>
+    <video id="replayVideo" controls style="display:none;"></video>
+  </div>
+
+  <script>
+    let currentEditFile = null;
+
+    async function startTest() {
+      const testName = document.getElementById('testName').value.trim();
+      const targetUrl = document.getElementById('targetUrl').value.trim();
+      const language = document.getElementById('language').value;
+      const useStorage = document.getElementById('useStorage').checked;
+      const btn = document.getElementById('startBtn');
+      const status = document.getElementById('status');
+
+      if (!testName || !targetUrl) { status.textContent = '请填写测试名称和目标网址'; return; }
+
+      btn.disabled = true;
+      status.textContent = '正在启动浏览器，请在弹出的窗口中操作...';
+
+      try {
+        const res = await fetch('/api/start-test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ testName, targetUrl, language, useStorage }),
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          status.innerHTML = `✅ 录制完成！<button onclick="downloadFile('${data.filename}')">下载 ${data.filename}</button>`;
+          loadFiles();
+        } else {
+          status.textContent = '❌ 失败: ' + data.error;
+        }
+      } catch (e) {
+        status.textContent = '❌ 请求失败: ' + e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function downloadFile(filename) {
+      window.open(`/api/tests/${encodeURIComponent(filename)}`, '_blank');
+    }
+
+    async function loadFiles() {
+      const container = document.getElementById('fileList');
+      try {
+        const res = await fetch('/api/tests');
+        const files = await res.json();
+        if (files.length === 0) { container.innerHTML = '<p>暂无录制文件</p>'; return; }
+
+        container.innerHTML = '<table><thead><tr><th>文件名</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead><tbody>'
+          + files.map(f => `<tr>
+              <td>${f.name}</td>
+              <td>${(f.size / 1024).toFixed(1)} KB</td>
+              <td>${new Date(f.mtime).toLocaleString()}</td>
+              <td>
+                <button onclick="openEditor('${encodeURIComponent(f.name)}')">编辑</button>
+                <button onclick="replayTest('${encodeURIComponent(f.name)}')">回放</button>
+                ${f.hasVideo ? `<button onclick="showVideo('${f.videoName}')">预览视频</button>` : ''}
+                <button class="danger" onclick="deleteTest('${encodeURIComponent(f.name)}')">删除</button>
+                <a href="/api/tests/${encodeURIComponent(f.name)}" download>下载</a>
+              </td>
+            </tr>`).join('')
+          + '</tbody></table>';
+      } catch (e) {
+        container.innerHTML = '<p>加载失败</p>';
+      }
+    }
+
+    async function openEditor(encodedName) {
+      const filename = decodeURIComponent(encodedName);
+      currentEditFile = filename;
+      const res = await fetch(`/api/tests/${encodeURIComponent(filename)}/content`);
+      const data = await res.json();
+      document.getElementById('editFilename').textContent = filename;
+      document.getElementById('editContent').value = data.content;
+      document.getElementById('editor').style.display = 'block';
+    }
+
+    async function saveFile() {
+      if (!currentEditFile) return;
+      const content = document.getElementById('editContent').value;
+      await fetch(`/api/tests/${encodeURIComponent(currentEditFile)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      alert('已保存');
+      closeEditor();
+      loadFiles();
+    }
+
+    function closeEditor() {
+      document.getElementById('editor').style.display = 'none';
+      currentEditFile = null;
+    }
+
+    async function replayTest(encodedName) {
+      const filename = decodeURIComponent(encodedName);
+      const area = document.getElementById('replayArea');
+      const status = document.getElementById('replayStatus');
+      const video = document.getElementById('replayVideo');
+
+      area.style.display = 'block';
+      video.style.display = 'none';
+      status.textContent = '正在回放，请等待浏览器操作完成...';
+
+      try {
+        const res = await fetch(`/api/tests/${encodeURIComponent(filename)}/replay`, { method: 'POST' });
+        const data = await res.json();
+
+        if (data.success && data.videoName) {
+          status.textContent = '回放完成';
+          showVideo(data.videoName);
+        } else {
+          status.textContent = data.message || '回放完成，但未生成视频';
+        }
+      } catch (e) {
+        status.textContent = '回放失败: ' + e.message;
+      }
+    }
+
+    function showVideo(videoName) {
+      const video = document.getElementById('replayVideo');
+      video.src = `/videos/${encodeURIComponent(videoName)}`;
+      video.style.display = 'block';
+      document.getElementById('replayArea').style.display = 'block';
+    }
+
+    async function deleteTest(encodedName) {
+      const filename = decodeURIComponent(encodedName);
+      if (!confirm(`确定删除 ${filename} 及其视频吗？`)) return;
+      await fetch(`/api/tests/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+      loadFiles();
+    }
+
+    loadFiles();
+  </script>
+</body>
+</html>
